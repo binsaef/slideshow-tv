@@ -1,0 +1,2 @@
+rootProject.name = "SlideshowTV"
+include ':app'
