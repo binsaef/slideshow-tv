@@ -39,7 +39,6 @@ public class MainActivity extends AppCompatActivity {
     private static final int FILE_CHOOSER_REQUEST = 100;
     private static final int PERMISSION_REQUEST   = 200;
 
-    // Image extensions we support
     private static final List<String> IMG_EXTS = Arrays.asList(
         "jpg","jpeg","png","webp","gif","bmp","avif"
     );
@@ -48,7 +47,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // ── Fullscreen / keep screen on ──
         getWindow().addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
             WindowManager.LayoutParams.FLAG_FULLSCREEN
@@ -87,13 +85,12 @@ public class MainActivity extends AppCompatActivity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
 
-        // Inject Android bridge
         webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+        webView.addJavascriptInterface(new SlideshowBridge(), "SlideshowBridge");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                // Tell JS we are on Android - inject helper
                 webView.evaluateJavascript(
                     "window._isAndroidApp = true;" +
                     "window._androidSdkVersion = " + Build.VERSION.SDK_INT + ";",
@@ -108,7 +105,6 @@ public class MainActivity extends AppCompatActivity {
                                               FileChooserParams params) {
                 if (filePathCallback != null) filePathCallback.onReceiveValue(null);
                 filePathCallback = cb;
-
                 Intent intent = params.createIntent();
                 intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 try {
@@ -122,22 +118,15 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    // ── Android Bridge: called from JavaScript ──
     class AndroidBridge {
 
-        /**
-         * Scan a directory for images and return JSON array of
-         * {name, path, size, lastModified} objects.
-         * JS calls: AndroidBridge.scanDirectory(path)
-         */
         @JavascriptInterface
         public String scanDirectory(String dirPath) {
             File dir = new File(dirPath);
             if (!dir.exists() || !dir.isDirectory()) return "[]";
-
             StringBuilder sb = new StringBuilder("[");
             scanDir(dir, sb, new boolean[]{false});
-            if (sb.length() > 1) sb.setLength(sb.length() - 1); // remove last comma
+            if (sb.length() > 1) sb.setLength(sb.length() - 1);
             sb.append("]");
             return sb.toString();
         }
@@ -160,10 +149,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        /**
-         * Read an image file and return as base64 data URL.
-         * JS calls: AndroidBridge.readImageAsBase64(path)
-         */
         @JavascriptInterface
         public String readImageAsBase64(String path) {
             try {
@@ -179,42 +164,31 @@ public class MainActivity extends AppCompatActivity {
                 } else {
                     b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
                 }
-                String mime = getMime(path);
-                return "data:" + mime + ";base64," + b64;
+                return "data:" + getMime(path) + ";base64," + b64;
             } catch (IOException e) {
                 return "";
             }
         }
 
-        /**
-         * Get list of USB/external storage root paths.
-         * JS calls: AndroidBridge.getStoragePaths()
-         */
         @JavascriptInterface
         public String getStoragePaths() {
             List<String> paths = new ArrayList<>();
-            // Internal storage
             paths.add(Environment.getExternalStorageDirectory().getAbsolutePath());
-            // External/USB storages
             File[] externalDirs = ContextCompat.getExternalFilesDirs(MainActivity.this, null);
             for (File dir : externalDirs) {
                 if (dir == null) continue;
                 String path = dir.getAbsolutePath();
-                // Navigate up to the root of the storage
                 int idx = path.indexOf("/Android/data");
                 if (idx >= 0) path = path.substring(0, idx);
                 if (!paths.contains(path)) paths.add(path);
             }
-            // Also check /storage for USB drives
             File storage = new File("/storage");
             if (storage.exists()) {
                 File[] vols = storage.listFiles();
                 if (vols != null) {
                     for (File v : vols) {
                         String p = v.getAbsolutePath();
-                        if (!p.equals("/storage/emulated") && !paths.contains(p)) {
-                            paths.add(p);
-                        }
+                        if (!p.equals("/storage/emulated") && !paths.contains(p)) paths.add(p);
                     }
                 }
             }
@@ -227,17 +201,11 @@ public class MainActivity extends AppCompatActivity {
             return sb.toString();
         }
 
-        /**
-         * Show a native toast message.
-         */
         @JavascriptInterface
         public void showToast(String msg) {
             runOnUiThread(() -> Toast.makeText(MainActivity.this, msg, Toast.LENGTH_SHORT).show());
         }
 
-        /**
-         * Keep screen on / allow sleep.
-         */
         @JavascriptInterface
         public void setKeepScreenOn(boolean on) {
             runOnUiThread(() -> {
@@ -268,20 +236,39 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ── TV Remote key handling ──
+    // ── TV Remote ──
+    private boolean slideshowStarted = false;
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_MEDIA_NEXT:
-                webView.evaluateJavascript("next();", null);
-                return true;
+                if (slideshowStarted) { webView.evaluateJavascript("next();", null); return true; }
+                break;
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
-                webView.evaluateJavascript("prev();", null);
-                return true;
+                if (slideshowStarted) { webView.evaluateJavascript("prev();", null); return true; }
+                break;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                if (!slideshowStarted) {
+                    runOnUiThread(() -> {
+                        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                        intent.setType("image/*");
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                        try {
+                            startActivityForResult(Intent.createChooser(intent, "اختر الصور"), FILE_CHOOSER_REQUEST);
+                        } catch (Exception e) {
+                            Toast.makeText(MainActivity.this, "لم يتم العثور على تطبيق لاختيار الملفات", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                    return true;
+                } else {
+                    webView.evaluateJavascript("togglePause();", null);
+                    return true;
+                }
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
                 webView.evaluateJavascript("togglePause();", null);
                 return true;
@@ -296,17 +283,21 @@ public class MainActivity extends AppCompatActivity {
         return super.onKeyDown(keyCode, event);
     }
 
-    // ── Permissions ──
+    class SlideshowBridge {
+        @JavascriptInterface
+        public void onSlideshowStarted() { slideshowStarted = true; }
+        @JavascriptInterface
+        public void onSlideshowStopped() { slideshowStarted = false; }
+    }
+
     private void requestPermissionsIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES)
                     != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this,
                     new String[]{Manifest.permission.READ_MEDIA_IMAGES}, PERMISSION_REQUEST);
             }
         } else {
-            // Android 12 and below
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
                     != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this,
@@ -318,9 +309,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
         super.onRequestPermissionsResult(req, perms, results);
-        if (req == PERMISSION_REQUEST && results.length > 0
-                && results[0] == PackageManager.PERMISSION_GRANTED) {
-            // Re-inject bridge after permission granted
+        if (req == PERMISSION_REQUEST && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
             webView.evaluateJavascript("if(typeof onPermissionGranted==='function') onPermissionGranted();", null);
         }
     }
@@ -347,14 +336,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
-    protected void onResume() {
-        super.onResume();
-        webView.onResume();
-    }
+    protected void onResume() { super.onResume(); webView.onResume(); }
 
     @Override
-    protected void onPause() {
-        super.onPause();
-        webView.onPause();
-    }
+    protected void onPause() { super.onPause(); webView.onPause(); }
 }
